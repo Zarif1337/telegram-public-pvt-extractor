@@ -1,6 +1,8 @@
 import os
 import sys
 import asyncio
+import base64
+import struct
 import requests
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired
@@ -36,31 +38,48 @@ def send_callback(data):
         print(f"Failed to post callback to worker: {e}")
 
 async def safe_export_session(client: Client) -> str:
-    """Safely exports session string by patching Pyrogram internal storage variables."""
+    """Safely exports session string by correctly calling Pyrogram's async storage methods."""
     s = client.storage
     
-    # Patch both public and hidden internal attributes (_user_id, _is_bot, etc.)
-    for target in [s, getattr(s, "_storage", s)]:
-        for attr in ["user_id", "_user_id"]:
-            try:
-                if getattr(target, attr, None) is None:
-                    setattr(target, attr, 0)
-            except Exception:
-                pass
-        for attr in ["is_bot", "_is_bot", "test_mode", "_test_mode"]:
-            try:
-                if getattr(target, attr, None) is None:
-                    setattr(target, attr, False)
-            except Exception:
-                pass
-        for attr in ["dc_id", "_dc_id"]:
-            try:
-                if not getattr(target, attr, None):
-                    setattr(target, attr, 2)
-            except Exception:
-                pass
+    # Pyrogram storage properties are async methods that take values to set internal state
+    try:
+        if await s.user_id() is None:
+            await s.user_id(0)
+    except Exception:
+        pass
+        
+    try:
+        if await s.is_bot() is None:
+            await s.is_bot(False)
+    except Exception:
+        pass
 
-    return await client.export_session_string()
+    try:
+        if await s.test_mode() is None:
+            await s.test_mode(False)
+    except Exception:
+        pass
+
+    # Method 1: Try native Pyrogram export
+    try:
+        return await client.export_session_string()
+    except Exception:
+        # Method 2: Fail-safe manual binary packing to guarantee no struct.error
+        dc_id = (await s.dc_id()) or 2
+        test_mode = bool(await s.test_mode())
+        auth_key = await s.auth_key()
+        user_id = (await s.user_id()) or 0
+        is_bot = bool(await s.is_bot())
+        
+        packed = struct.pack(
+            s.STRING_FORMAT,
+            dc_id,
+            test_mode,
+            auth_key,
+            user_id,
+            is_bot
+        )
+        return base64.urlsafe_b64encode(packed).decode().rstrip("=")
 
 async def handle_send_code():
     if not API_ID_RAW or not API_HASH:
@@ -71,8 +90,6 @@ async def handle_send_code():
     await client.connect()
     try:
         sent_code = await client.send_code(PHONE)
-        
-        # Safely export temp session string without integer type crashes
         temp_session = await safe_export_session(client)
         
         send_callback({
@@ -121,4 +138,3 @@ if __name__ == "__main__":
         asyncio.run(handle_verify_code())
     elif ACTION == "verify_2fa":
         asyncio.run(handle_verify_2fa())
-                           
