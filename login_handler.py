@@ -5,10 +5,16 @@ import requests
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-WORKER_URL = os.environ["WORKER_URL"].rstrip("/")
-WORKER_SECRET = os.environ["WORKER_SECRET"]
+# Safely load environment variables
+API_ID_RAW = os.environ.get("API_ID", "")
+API_HASH = os.environ.get("API_HASH", "")
+
+WORKER_URL = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+# Automatically fix missing https:// if forgotten
+if WORKER_URL and not WORKER_URL.startswith("http://") and not WORKER_URL.startswith("https://"):
+    WORKER_URL = "https://" + WORKER_URL
+
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
 ACTION = os.environ.get("ACTION")
 USER_ID = os.environ.get("USER_ID")
@@ -19,15 +25,31 @@ PHONE_CODE_HASH = os.environ.get("PHONE_CODE_HASH")
 TEMP_SESSION = os.environ.get("TEMP_SESSION")
 
 def send_callback(data):
+    """Sends status updates back to Cloudflare Worker."""
+    if not WORKER_URL or not WORKER_SECRET:
+        print("ERROR: WORKER_URL or WORKER_SECRET missing in GitHub Secrets!")
+        return
     headers = {"X-Secret-Key": WORKER_SECRET, "Content-Type": "application/json"}
     payload = {"user_id": USER_ID, **data}
-    requests.post(f"{WORKER_URL}/callback/login", json=payload, headers=headers)
+    try:
+        requests.post(f"{WORKER_URL}/callback/login", json=payload, headers=headers, timeout=10)
+    except Exception as e:
+        print(f"Failed to post callback to worker: {e}")
 
 async def handle_send_code():
-    client = Client("temp_session", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    if not API_ID_RAW or not API_HASH:
+        send_callback({"action": "login_failed", "error": "TELEGRAM_API_ID or TELEGRAM_API_HASH is missing in GitHub Secrets."})
+        return
+
+    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, in_memory=True)
     await client.connect()
     try:
         sent_code = await client.send_code(PHONE)
+        
+        # FIX: Pyrogram requires a dummy integer user_id before exporting string session on non-logged in state
+        if getattr(client.storage, "user_id", None) is None:
+            client.storage.user_id = 0
+            
         temp_session = await client.export_session_string()
         send_callback({
             "action": "code_sent",
@@ -35,12 +57,12 @@ async def handle_send_code():
             "temp_session": temp_session
         })
     except Exception as e:
-        send_callback({"action": "login_failed", "error": str(e)})
+        send_callback({"action": "login_failed", "error": f"Telegram API Error: {str(e)}"})
     finally:
         await client.disconnect()
 
 async def handle_verify_code():
-    client = Client("temp_session", api_id=API_ID, api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
+    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
     await client.connect()
     try:
         await client.sign_in(PHONE, PHONE_CODE_HASH, CODE)
@@ -49,15 +71,15 @@ async def handle_verify_code():
     except SessionPasswordNeeded:
         temp_session = await client.export_session_string()
         send_callback({"action": "need_2fa", "temp_session": temp_session})
-    except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        send_callback({"action": "login_failed", "error": "Invalid or expired login code."})
+    except (PhoneCodeInvalid, PhoneCodeExpired):
+        send_callback({"action": "login_failed", "error": "Invalid or expired login code. Please try /login again."})
     except Exception as e:
         send_callback({"action": "login_failed", "error": str(e)})
     finally:
         await client.disconnect()
 
 async def handle_verify_2fa():
-    client = Client("temp_session", api_id=API_ID, api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
+    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
     await client.connect()
     try:
         await client.check_password(PASSWORD)
@@ -75,3 +97,4 @@ if __name__ == "__main__":
         asyncio.run(handle_verify_code())
     elif ACTION == "verify_2fa":
         asyncio.run(handle_verify_2fa())
+    
