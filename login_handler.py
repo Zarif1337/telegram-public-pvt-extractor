@@ -1,140 +1,100 @@
 import os
 import sys
+import re
 import asyncio
-import base64
-import struct
 import requests
 from pyrogram import Client
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired
+from pyrogram.errors import PeerIdInvalid, ChannelPrivate, ChatAdminRequired
 
-# Safely load environment variables
+# Safely load environment variables passed from GitHub Actions
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+STRING_SESSION = os.environ.get("STRING_SESSION", "")
+LINK = os.environ.get("LINK", "")
+TARGET_CHAT_ID = os.environ.get("CHAT_ID", "")
 
-WORKER_URL = os.environ.get("WORKER_URL", "").strip().rstrip("/")
-if WORKER_URL and not WORKER_URL.startswith("http://") and not WORKER_URL.startswith("https://"):
-    WORKER_URL = "https://" + WORKER_URL
-
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
-
-ACTION = os.environ.get("ACTION")
-USER_ID = os.environ.get("USER_ID")
-PHONE = os.environ.get("PHONE")
-CODE = os.environ.get("CODE")
-PASSWORD = os.environ.get("PASSWORD")
-PHONE_CODE_HASH = os.environ.get("PHONE_CODE_HASH")
-TEMP_SESSION = os.environ.get("TEMP_SESSION")
-
-def send_callback(data):
-    """Sends status updates back to Cloudflare Worker."""
-    if not WORKER_URL or not WORKER_SECRET:
-        print("ERROR: WORKER_URL or WORKER_SECRET missing in GitHub Secrets!")
+def send_bot_message(text):
+    """Sends status updates back to the user via Telegram Bot API."""
+    if not BOT_TOKEN or not TARGET_CHAT_ID:
         return
-    headers = {"X-Secret-Key": WORKER_SECRET, "Content-Type": "application/json"}
-    payload = {"user_id": USER_ID, **data}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TARGET_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        requests.post(f"{WORKER_URL}/callback/login", json=payload, headers=headers, timeout=10)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Failed to post callback to worker: {e}")
+        print(f"Failed to send bot message: {e}")
 
-async def safe_export_session(client: Client) -> str:
-    """Safely exports session string by correctly calling Pyrogram's async storage methods."""
-    s = client.storage
-    
-    # Pyrogram storage properties are async methods that take values to set internal state
-    try:
-        if await s.user_id() is None:
-            await s.user_id(0)
-    except Exception:
-        pass
-        
-    try:
-        if await s.is_bot() is None:
-            await s.is_bot(False)
-    except Exception:
-        pass
+def parse_telegram_link(link):
+    """Extracts chat identifier and message ID from public and private Telegram links."""
+    # Handles private links: t.me/c/3981274773/3 -> chat_id = -1003981274773
+    pvt_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+    if pvt_match:
+        chat_id = int("-100" + pvt_match.group(1))
+        message_id = int(pvt_match.group(2))
+        return chat_id, message_id
+
+    # Handles public links: t.me/channel_username/3
+    pub_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
+    if pub_match:
+        chat_id = pub_match.group(1)
+        message_id = int(pub_match.group(2))
+        return chat_id, message_id
+
+    return None, None
+
+async def run_extraction():
+    if not API_ID_RAW or not API_HASH or not STRING_SESSION:
+        send_bot_message("❌ **Extraction Error:** Missing API credentials or user session string.")
+        return
+
+    chat_id, message_id = parse_telegram_link(LINK)
+    if not chat_id or not message_id:
+        send_bot_message("❌ **Invalid Link Format:** Could not parse message ID from the provided link.")
+        return
+
+    # Initialize Pyrogram client with the saved string session
+    client = Client(
+        "user_session",
+        api_id=int(API_ID_RAW),
+        api_hash=API_HASH,
+        session_string=STRING_SESSION,
+        in_memory=True
+    )
+
+    await client.connect()
 
     try:
-        if await s.test_mode() is None:
-            await s.test_mode(False)
-    except Exception:
-        pass
+        # Step 1: Try fetching the message directly
+        try:
+            msg = await client.get_messages(chat_id, message_id)
+        except PeerIdInvalid:
+            # Step 2: If peer cache is missing, sync dialogs to load private chats into memory
+            print("Peer ID missing in cache. Syncing account dialogs...")
+            async for dialog in client.get_dialogs(limit=100):
+                pass
+            # Step 3: Retry fetching the message after sync
+            msg = await client.get_messages(chat_id, message_id)
 
-    # Method 1: Try native Pyrogram export
-    try:
-        return await client.export_session_string()
-    except Exception:
-        # Method 2: Fail-safe manual binary packing to guarantee no struct.error
-        dc_id = (await s.dc_id()) or 2
-        test_mode = bool(await s.test_mode())
-        auth_key = await s.auth_key()
-        user_id = (await s.user_id()) or 0
-        is_bot = bool(await s.is_bot())
-        
-        packed = struct.pack(
-            s.STRING_FORMAT,
-            dc_id,
-            test_mode,
-            auth_key,
-            user_id,
-            is_bot
+        if not msg or msg.empty:
+            send_bot_message("❌ **Message Not Found:** The post might be deleted or restricted.")
+            return
+
+        # Step 4: Forward / copy message to your personal chat with the bot
+        await client.copy_message(
+            chat_id=int(TARGET_CHAT_ID),
+            from_chat_id=chat_id,
+            message_id=message_id
         )
-        return base64.urlsafe_b64encode(packed).decode().rstrip("=")
 
-async def handle_send_code():
-    if not API_ID_RAW or not API_HASH:
-        send_callback({"action": "login_failed", "error": "TELEGRAM_API_ID or TELEGRAM_API_HASH is missing in GitHub Secrets."})
-        return
-
-    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, in_memory=True)
-    await client.connect()
-    try:
-        sent_code = await client.send_code(PHONE)
-        temp_session = await safe_export_session(client)
-        
-        send_callback({
-            "action": "code_sent",
-            "phone_code_hash": sent_code.phone_code_hash,
-            "temp_session": temp_session
-        })
+    except PeerIdInvalid:
+        send_bot_message("❌ **Access Denied:** Your Telegram account is NOT a member of this private channel. Please join the channel first!")
+    except ChannelPrivate:
+        send_bot_message("❌ **Access Denied:** This channel is private and your account does not have access.")
     except Exception as e:
-        send_callback({"action": "login_failed", "error": f"Telegram API Error: {str(e)}"})
-    finally:
-        await client.disconnect()
-
-async def handle_verify_code():
-    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
-    await client.connect()
-    try:
-        await client.sign_in(PHONE, PHONE_CODE_HASH, CODE)
-        final_session = await safe_export_session(client)
-        send_callback({"action": "login_success", "session": final_session})
-    except SessionPasswordNeeded:
-        temp_session = await safe_export_session(client)
-        send_callback({"action": "need_2fa", "temp_session": temp_session})
-    except (PhoneCodeInvalid, PhoneCodeExpired):
-        send_callback({"action": "login_failed", "error": "Invalid or expired login code. Please try /login again."})
-    except Exception as e:
-        send_callback({"action": "login_failed", "error": str(e)})
-    finally:
-        await client.disconnect()
-
-async def handle_verify_2fa():
-    client = Client("temp_session", api_id=int(API_ID_RAW), api_hash=API_HASH, session_string=TEMP_SESSION, in_memory=True)
-    await client.connect()
-    try:
-        await client.check_password(PASSWORD)
-        final_session = await safe_export_session(client)
-        send_callback({"action": "login_success", "session": final_session})
-    except Exception as e:
-        send_callback({"action": "login_failed", "error": "Incorrect 2FA password."})
+        send_bot_message(f"❌ **Extraction Error:** {str(e)}")
     finally:
         await client.disconnect()
 
 if __name__ == "__main__":
-    if ACTION == "send_code":
-        asyncio.run(handle_send_code())
-    elif ACTION == "verify_code":
-        asyncio.run(handle_verify_code())
-    elif ACTION == "verify_2fa":
-        asyncio.run(handle_verify_2fa())
+    asyncio.run(run_extraction())
