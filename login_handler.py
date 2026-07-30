@@ -10,7 +10,6 @@ API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
 
 WORKER_URL = os.environ.get("WORKER_URL", "").strip().rstrip("/")
-# Automatically fix missing https:// if forgotten
 if WORKER_URL and not WORKER_URL.startswith("http://") and not WORKER_URL.startswith("https://"):
     WORKER_URL = "https://" + WORKER_URL
 
@@ -36,6 +35,19 @@ def send_callback(data):
     except Exception as e:
         print(f"Failed to post callback to worker: {e}")
 
+async def safe_export_session(client: Client) -> str:
+    """Safely exports session string by filling empty internal storage attributes."""
+    storage = client.storage
+    if getattr(storage, "dc_id", None) is None:
+        storage.dc_id = 2
+    if getattr(storage, "test_mode", None) is None:
+        storage.test_mode = False
+    if getattr(storage, "user_id", None) is None:
+        storage.user_id = 0
+    if getattr(storage, "is_bot", None) is None:
+        storage.is_bot = False
+    return await client.export_session_string()
+
 async def handle_send_code():
     if not API_ID_RAW or not API_HASH:
         send_callback({"action": "login_failed", "error": "TELEGRAM_API_ID or TELEGRAM_API_HASH is missing in GitHub Secrets."})
@@ -46,11 +58,9 @@ async def handle_send_code():
     try:
         sent_code = await client.send_code(PHONE)
         
-        # FIX: Pyrogram requires a dummy integer user_id before exporting string session on non-logged in state
-        if getattr(client.storage, "user_id", None) is None:
-            client.storage.user_id = 0
-            
-        temp_session = await client.export_session_string()
+        # Safely export temp session string without integer type crashes
+        temp_session = await safe_export_session(client)
+        
         send_callback({
             "action": "code_sent",
             "phone_code_hash": sent_code.phone_code_hash,
@@ -66,10 +76,10 @@ async def handle_verify_code():
     await client.connect()
     try:
         await client.sign_in(PHONE, PHONE_CODE_HASH, CODE)
-        final_session = await client.export_session_string()
+        final_session = await safe_export_session(client)
         send_callback({"action": "login_success", "session": final_session})
     except SessionPasswordNeeded:
-        temp_session = await client.export_session_string()
+        temp_session = await safe_export_session(client)
         send_callback({"action": "need_2fa", "temp_session": temp_session})
     except (PhoneCodeInvalid, PhoneCodeExpired):
         send_callback({"action": "login_failed", "error": "Invalid or expired login code. Please try /login again."})
@@ -83,7 +93,7 @@ async def handle_verify_2fa():
     await client.connect()
     try:
         await client.check_password(PASSWORD)
-        final_session = await client.export_session_string()
+        final_session = await safe_export_session(client)
         send_callback({"action": "login_success", "session": final_session})
     except Exception as e:
         send_callback({"action": "login_failed", "error": "Incorrect 2FA password."})
