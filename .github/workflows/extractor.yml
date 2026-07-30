@@ -1,0 +1,33 @@
+name: Telegram Content Extractor Runner
+
+on:
+  repository_dispatch:
+    types: [extract_content]
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies & FFmpeg
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install pyrogram tgcrypto requests
+
+      - name: Run Extraction Task
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          USER_ID: ${{ github.event.client_payload.user_id }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          LINK: ${{ github.event.client_payload.link }}
+          STRING_SESSION: ${{ github.event.client_payload.string_session }}
+        run: python extractor.py
