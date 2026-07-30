@@ -1,11 +1,11 @@
-name: Telegram Content Extractor Runner
+name: Telegram Content Extractor Engine
 
 on:
   repository_dispatch:
-    types: [extract_content]
+    types: [login_send_code, login_verify_code, login_verify_2fa, extract_content]
 
 jobs:
-  extract:
+  runner:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -16,12 +16,29 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install System Dependencies & FFmpeg
+      - name: Install Dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
           pip install pyrogram tgcrypto requests
 
+      - name: Run Login Task
+        if: contains(github.event_name, 'login') || github.event.action == 'login_send_code' || github.event.action == 'login_verify_code' || github.event.action == 'login_verify_2fa'
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          ACTION: ${{ github.event.action == 'login_send_code' && 'send_code' || (github.event.action == 'login_verify_code' && 'verify_code' || 'verify_2fa') }}
+          USER_ID: ${{ github.event.client_payload.user_id }}
+          PHONE: ${{ github.event.client_payload.phone }}
+          CODE: ${{ github.event.client_payload.code }}
+          PASSWORD: ${{ github.event.client_payload.password }}
+          PHONE_CODE_HASH: ${{ github.event.client_payload.phone_code_hash }}
+          TEMP_SESSION: ${{ github.event.client_payload.temp_session }}
+        run: python login_handler.py
+
       - name: Run Extraction Task
+        if: github.event.action == 'extract_content'
         env:
           API_ID: ${{ secrets.TELEGRAM_API_ID }}
           API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
