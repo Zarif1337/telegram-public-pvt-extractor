@@ -36,16 +36,30 @@ def send_callback(data):
         print(f"Failed to post callback to worker: {e}")
 
 async def safe_export_session(client: Client) -> str:
-    """Safely exports session string by filling empty internal storage attributes."""
-    storage = client.storage
-    if getattr(storage, "dc_id", None) is None:
-        storage.dc_id = 2
-    if getattr(storage, "test_mode", None) is None:
-        storage.test_mode = False
-    if getattr(storage, "user_id", None) is None:
-        storage.user_id = 0
-    if getattr(storage, "is_bot", None) is None:
-        storage.is_bot = False
+    """Safely exports session string by patching Pyrogram internal storage variables."""
+    s = client.storage
+    
+    # Patch both public and hidden internal attributes (_user_id, _is_bot, etc.)
+    for target in [s, getattr(s, "_storage", s)]:
+        for attr in ["user_id", "_user_id"]:
+            try:
+                if getattr(target, attr, None) is None:
+                    setattr(target, attr, 0)
+            except Exception:
+                pass
+        for attr in ["is_bot", "_is_bot", "test_mode", "_test_mode"]:
+            try:
+                if getattr(target, attr, None) is None:
+                    setattr(target, attr, False)
+            except Exception:
+                pass
+        for attr in ["dc_id", "_dc_id"]:
+            try:
+                if not getattr(target, attr, None):
+                    setattr(target, attr, 2)
+            except Exception:
+                pass
+
     return await client.export_session_string()
 
 async def handle_send_code():
@@ -107,4 +121,4 @@ if __name__ == "__main__":
         asyncio.run(handle_verify_code())
     elif ACTION == "verify_2fa":
         asyncio.run(handle_verify_2fa())
-    
+                           
