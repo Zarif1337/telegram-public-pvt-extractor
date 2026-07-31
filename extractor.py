@@ -47,7 +47,6 @@ async def run_extraction():
     api_id = int(API_ID_RAW)
     target_chat = int(TARGET_CHAT_ID)
 
-    # 1. User Client: Uses the requesting user's STRING_SESSION passed from Cloudflare KV
     user_client = Client(
         "user_session",
         api_id=api_id,
@@ -56,7 +55,6 @@ async def run_extraction():
         in_memory=True
     )
 
-    # 2. Bot Client: Uses MTProto binary engine (Supports up to 2GB uploads!)
     bot_client = Client(
         "bot_session",
         api_id=api_id,
@@ -69,14 +67,31 @@ async def run_extraction():
     await bot_client.start()
 
     try:
-        # Sync user dialogs to build channel peer cache
-        if isinstance(chat_id, int):
-            print("Syncing user account dialogs...")
-            async for dialog in user_client.get_dialogs(limit=100):
-                pass
+        # Smart Search: Scan user dialogs specifically for the target channel ID
+        target_peer = chat_id
+        found_channel = False
 
-        print("Fetching private message...")
-        msg = await user_client.get_messages(chat_id, message_id)
+        if isinstance(chat_id, int):
+            print(f"Scanning user dialogs for channel raw ID: {raw_id}...")
+            async for dialog in user_client.get_dialogs():
+                chat = dialog.chat
+                # Match exact chat ID or numerical suffix
+                if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
+                    target_peer = chat.id
+                    found_channel = True
+                    print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})")
+                    break
+
+        if isinstance(chat_id, int) and not found_channel:
+            print(f"⚠️ Channel {chat_id} not found in user account dialogs!")
+            await bot_client.send_message(
+                target_chat, 
+                "❌ **Channel Not Found:** The logged-in account is not a member of this private channel, or your account session needs to be refreshed via `/login`."
+            )
+            return
+
+        print(f"Fetching private message {message_id} from target peer...")
+        msg = await user_client.get_messages(target_peer, message_id)
 
         if not msg or msg.empty:
             await bot_client.send_message(target_chat, "❌ **Message Not Found:** Post might be deleted or unavailable.")
@@ -92,7 +107,6 @@ async def run_extraction():
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 print(f"Downloaded size: {file_size_mb:.2f} MB. Uploading via Bot MTProto engine...")
 
-                # Upload directly as the Bot over MTProto (up to 2GB limit)
                 if msg.photo:
                     await bot_client.send_photo(target_chat, photo=file_path, caption=caption)
                 elif msg.video:
