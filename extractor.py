@@ -63,28 +63,20 @@ async def run_extraction():
     await client.connect()
 
     try:
-        target_peer = None
-
-        # Scan account dialogs to find the matching channel entity & load access key
+        # Step 1: Prime Pyrogram's memory database with access hashes by scanning joined dialogs
         if isinstance(chat_id, int):
-            print(f"Scanning dialogs for channel ID: {chat_id}...")
+            print(f"Syncing account dialogs to populate peer cache for ID: {chat_id}...")
             async for dialog in client.get_dialogs(limit=500):
-                chat = dialog.chat
-                if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
-                    target_peer = chat
-                    break
+                pass  # Iterating populates internal peer memory automatically
 
-        if not target_peer:
-            target_peer = chat_id
-
-        # Fetch message using target_peer
-        msg = await client.get_messages(target_peer, message_id)
+        # Step 2: Fetch message using the integer chat_id directly
+        msg = await client.get_messages(chat_id, message_id)
 
         if not msg or msg.empty:
             send_bot_message("❌ **Message Not Found:** The post might be deleted or unavailable.")
             return
 
-        # Attempt Direct Copy or Download Fallback
+        # Step 3: Copy message or download/re-upload if saving content is restricted
         try:
             await msg.copy(chat_id=int(TARGET_CHAT_ID))
         except Exception as copy_err:
@@ -122,4 +114,3 @@ async def run_extraction():
 
 if __name__ == "__main__":
     asyncio.run(run_extraction())
-    
