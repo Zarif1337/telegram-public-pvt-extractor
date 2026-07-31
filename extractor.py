@@ -3,7 +3,7 @@ import sys
 import re
 import asyncio
 from pyrogram import Client
-from pyrogram.errors import PeerIdInvalid, ChannelPrivate, FloodWait
+from pyrogram.errors import PeerIdInvalid, ChannelPrivate, FloodWait, UsernameInvalid, UsernameNotOccupied
 
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
@@ -28,7 +28,11 @@ def parse_telegram_link(link):
     pub_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
     if pub_match:
         raw_chat = pub_match.group(1)
-        chat_id = int(raw_chat) if raw_chat.lstrip('-').isdigit() else raw_chat
+        if raw_chat.lstrip('-').isdigit():
+            chat_id = int(raw_chat)
+        else:
+            # Ensure public usernames start with '@'
+            chat_id = f"@{raw_chat}" if not raw_chat.startswith("@") else raw_chat
         message_id = int(pub_match.group(2))
         return chat_id, raw_chat, message_id
 
@@ -67,30 +71,42 @@ async def run_extraction():
     await bot_client.start()
 
     try:
-        # Smart Search: Scan user dialogs specifically for the target channel ID
         target_peer = chat_id
-        found_channel = False
 
-        if isinstance(chat_id, int):
+        # --- PUBLIC CHANNEL HANDLING ---
+        if isinstance(chat_id, str) and chat_id.startswith("@"):
+            print(f"Resolving public channel username: {chat_id}...")
+            try:
+                chat_obj = await user_client.get_chat(chat_id)
+                target_peer = chat_obj.id
+                print(f"✅ Resolved public channel: '{chat_obj.title}' (ID: {chat_obj.id})")
+            except (UsernameInvalid, UsernameNotOccupied):
+                await bot_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
+                return
+            except Exception as e:
+                print(f"Warning resolving username directly: {e}")
+
+        # --- PRIVATE CHANNEL HANDLING ---
+        elif isinstance(chat_id, int):
+            found_channel = False
             print(f"Scanning user dialogs for channel raw ID: {raw_id}...")
             async for dialog in user_client.get_dialogs():
                 chat = dialog.chat
-                # Match exact chat ID or numerical suffix
                 if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
                     target_peer = chat.id
                     found_channel = True
                     print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})")
                     break
 
-        if isinstance(chat_id, int) and not found_channel:
-            print(f"⚠️ Channel {chat_id} not found in user account dialogs!")
-            await bot_client.send_message(
-                target_chat, 
-                "❌ **Channel Not Found:** The logged-in account is not a member of this private channel, or your account session needs to be refreshed via `/login`."
-            )
-            return
+            if not found_channel:
+                print(f"⚠️ Channel {chat_id} not found in user account dialogs!")
+                await bot_client.send_message(
+                    target_chat, 
+                    "❌ **Channel Not Found:** Make sure your logged-in user account has joined this private channel."
+                )
+                return
 
-        print(f"Fetching private message {message_id} from target peer...")
+        print(f"Fetching message {message_id} from target peer...")
         msg = await user_client.get_messages(target_peer, message_id)
 
         if not msg or msg.empty:
@@ -126,7 +142,7 @@ async def run_extraction():
     except FloodWait as fw:
         await bot_client.send_message(target_chat, f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
     except PeerIdInvalid:
-        await bot_client.send_message(target_chat, "❌ **Peer Invalid:** Make sure your logged-in user account has joined this private channel!")
+        await bot_client.send_message(target_chat, "❌ **Peer Invalid:** Unable to resolve this chat. Make sure the channel exists and is accessible.")
     except ChannelPrivate:
         await bot_client.send_message(target_chat, "❌ **Channel Private:** Your account does not have permission to view posts here.")
     except Exception as e:
