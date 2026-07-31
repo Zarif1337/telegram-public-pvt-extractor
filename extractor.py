@@ -4,7 +4,7 @@ import re
 import asyncio
 import requests
 from pyrogram import Client
-from pyrogram.errors import PeerIdInvalid, ChannelPrivate, ChatAdminRequired, FloodWait
+from pyrogram.errors import PeerIdInvalid, ChannelPrivate, FloodWait
 
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
@@ -16,21 +16,47 @@ TARGET_CHAT_ID = os.environ.get("CHAT_ID", "")
 print(f"--- EXTRACTION RUNNER LOGS ---")
 print(f"LINK received: {LINK}")
 print(f"CHAT_ID received: {TARGET_CHAT_ID}")
-print(f"BOT_TOKEN present: {bool(BOT_TOKEN)}")
-print(f"STRING_SESSION present: {bool(STRING_SESSION)}")
 
 def send_bot_message(text):
-    """Sends status updates back to the user via Telegram Bot API."""
+    """Sends text messages directly to the user's chat with the bot."""
     if not BOT_TOKEN or not TARGET_CHAT_ID:
-        print(f"[WARNING] Cannot send Telegram message. BOT_TOKEN or CHAT_ID missing! Text: {text}")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TARGET_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        print(f"Bot sendMessage status: {res.status_code}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Failed to send bot message: {e}")
+        print(f"Failed to send bot text message: {e}")
+
+def send_bot_file(file_path, caption="", media_type="document"):
+    """Uploads media directly through the Bot API into the bot chat thread."""
+    if not BOT_TOKEN or not TARGET_CHAT_ID or not os.path.exists(file_path):
+        return
+    
+    endpoint = "sendDocument"
+    field_name = "document"
+    
+    if media_type == "photo":
+        endpoint = "sendPhoto"
+        field_name = "photo"
+    elif media_type == "video":
+        endpoint = "sendVideo"
+        field_name = "video"
+    elif media_type == "audio":
+        endpoint = "sendAudio"
+        field_name = "audio"
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{endpoint}"
+    
+    try:
+        print(f"Uploading file via Bot API endpoint: {endpoint}...")
+        with open(file_path, "rb") as f:
+            files = {field_name: f}
+            data = {"chat_id": TARGET_CHAT_ID, "caption": caption}
+            res = requests.post(url, data=data, files=files, timeout=300)
+            print(f"Bot {endpoint} status code: {res.status_code}")
+    except Exception as e:
+        print(f"Failed to upload media via Bot API: {e}")
 
 def parse_telegram_link(link):
     """Extracts chat identifier and message ID from Telegram links."""
@@ -52,7 +78,7 @@ def parse_telegram_link(link):
 
 async def run_extraction():
     if not API_ID_RAW or not API_HASH or not STRING_SESSION:
-        send_bot_message("❌ **Extraction Error:** Missing API credentials or session string in GitHub Secrets.")
+        send_bot_message("❌ **Extraction Error:** Missing API credentials or session string.")
         return
 
     chat_id, raw_id, message_id = parse_telegram_link(LINK)
@@ -71,7 +97,7 @@ async def run_extraction():
     try:
         await client.connect()
     except Exception as conn_err:
-        send_bot_message(f"❌ **Connection Error:** Failed to connect to Telegram: {conn_err}")
+        send_bot_message(f"❌ **Connection Error:** Failed to connect: {conn_err}")
         return
 
     try:
@@ -86,43 +112,33 @@ async def run_extraction():
             send_bot_message("❌ **Message Not Found:** The post might be deleted or unavailable.")
             return
 
-        print("Message fetched successfully. Sending content...")
+        print("Message fetched successfully. Extracting media/content...")
+        caption = msg.caption or msg.text or ""
 
-        # Copy directly to user chat
-        try:
-            await msg.copy(chat_id=int(TARGET_CHAT_ID))
-            print("Successfully copied message via user session.")
-            send_bot_message("✅ **Extraction Complete!** Check your chat above.")
-        except Exception as copy_err:
-            print(f"Direct copy failed: {copy_err}. Downloading media...")
-            caption = msg.caption or msg.text or ""
-            if msg.media:
-                file_path = await client.download_media(msg)
-                if file_path:
-                    if msg.photo:
-                        await client.send_photo(int(TARGET_CHAT_ID), photo=file_path, caption=caption)
-                    elif msg.video:
-                        await client.send_video(int(TARGET_CHAT_ID), video=file_path, caption=caption)
-                    elif msg.document:
-                        await client.send_document(int(TARGET_CHAT_ID), document=file_path, caption=caption)
-                    elif msg.audio:
-                        await client.send_audio(int(TARGET_CHAT_ID), audio=file_path, caption=caption)
-                    elif msg.voice:
-                        await client.send_voice(int(TARGET_CHAT_ID), voice=file_path, caption=caption)
-                    else:
-                        await client.send_document(int(TARGET_CHAT_ID), document=file_path, caption=caption)
-                    
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-            elif caption:
-                await client.send_message(int(TARGET_CHAT_ID), text=caption)
+        if msg.media:
+            print("Downloading media to cloud runner...")
+            file_path = await client.download_media(msg)
             
-            send_bot_message("✅ **Extraction Complete!**")
+            if file_path:
+                mtype = "document"
+                if msg.photo:
+                    mtype = "photo"
+                elif msg.video:
+                    mtype = "video"
+                elif msg.audio:
+                    mtype = "audio"
+
+                send_bot_file(file_path, caption=caption, media_type=mtype)
+                
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+        elif caption:
+            send_bot_message(caption)
 
     except FloodWait as fw:
-        send_bot_message(f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
+        send_bot_message(f"⏳ **Rate Limited:** Please wait `{fw.value}` seconds.")
     except PeerIdInvalid:
-        send_bot_message("❌ **Peer Invalid:** Make sure your logged-in account has joined this private channel!")
+        send_bot_message("❌ **Peer Invalid:** Make sure your account has joined this private channel!")
     except ChannelPrivate:
         send_bot_message("❌ **Channel Private:** Your account does not have permission to view posts here.")
     except Exception as e:
