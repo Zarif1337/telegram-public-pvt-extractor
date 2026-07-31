@@ -29,9 +29,9 @@ def send_bot_message(text):
         print(f"Failed to send bot text message: {e}")
 
 def send_bot_file(file_path, caption="", media_type="document"):
-    """Uploads media directly through the Bot API into the bot chat thread."""
+    """Uploads media through the Bot API into the bot chat thread (Max 50MB)."""
     if not BOT_TOKEN or not TARGET_CHAT_ID or not os.path.exists(file_path):
-        return
+        return False
     
     endpoint = "sendDocument"
     field_name = "document"
@@ -55,8 +55,14 @@ def send_bot_file(file_path, caption="", media_type="document"):
             data = {"chat_id": TARGET_CHAT_ID, "caption": caption}
             res = requests.post(url, data=data, files=files, timeout=300)
             print(f"Bot {endpoint} status code: {res.status_code}")
+            if res.status_code == 200:
+                return True
+            else:
+                print(f"Bot API Upload Failed with status {res.status_code}: {res.text}")
+                return False
     except Exception as e:
         print(f"Failed to upload media via Bot API: {e}")
+        return False
 
 def parse_telegram_link(link):
     """Extracts chat identifier and message ID from Telegram links."""
@@ -75,6 +81,26 @@ def parse_telegram_link(link):
         return chat_id, raw_chat, message_id
 
     return None, None, None
+
+async def send_via_pyrogram(client, file_path, caption, msg):
+    """Uploads large files (up to 2GB) directly using Pyrogram client."""
+    target = int(TARGET_CHAT_ID)
+    try:
+        print("Uploading large file via Pyrogram MTProto client...")
+        if msg.photo:
+            await client.send_photo(target, photo=file_path, caption=caption)
+        elif msg.video:
+            await client.send_video(target, video=file_path, caption=caption)
+        elif msg.audio:
+            await client.send_audio(target, audio=file_path, caption=caption)
+        elif msg.voice:
+            await client.send_voice(target, voice=file_path, caption=caption)
+        else:
+            await client.send_document(target, document=file_path, caption=caption)
+        print("Pyrogram upload completed successfully!")
+    except Exception as e:
+        print(f"Pyrogram upload failed: {e}")
+        send_bot_message(f"❌ **Upload Error:** `{str(e)}`")
 
 async def run_extraction():
     if not API_ID_RAW or not API_HASH or not STRING_SESSION:
@@ -119,7 +145,10 @@ async def run_extraction():
             print("Downloading media to cloud runner...")
             file_path = await client.download_media(msg)
             
-            if file_path:
+            if file_path and os.path.exists(file_path):
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                print(f"Downloaded file size: {file_size_mb:.2f} MB")
+
                 mtype = "document"
                 if msg.photo:
                     mtype = "photo"
@@ -128,8 +157,17 @@ async def run_extraction():
                 elif msg.audio:
                     mtype = "audio"
 
-                send_bot_file(file_path, caption=caption, media_type=mtype)
-                
+                # Check file size against 50MB Bot API limit
+                if file_size_mb <= 50:
+                    success = send_bot_file(file_path, caption=caption, media_type=mtype)
+                    if not success:
+                        send_bot_message("⚠️ Bot API upload failed. Uploading via User Session...")
+                        await send_via_pyrogram(client, file_path, caption, msg)
+                else:
+                    # File > 50MB -> Use Pyrogram MTProto (supports up to 2GB)
+                    send_bot_message(f"📦 **Large File Detected ({file_size_mb:.1f} MB):** Uploading via User Session to your **Saved Messages**...")
+                    await send_via_pyrogram(client, file_path, caption, msg)
+
                 if os.path.exists(file_path):
                     os.remove(file_path)
         elif caption:
