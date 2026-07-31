@@ -12,9 +12,9 @@ STRING_SESSION = os.environ.get("STRING_SESSION", "")
 LINK = os.environ.get("LINK", "")
 TARGET_CHAT_ID = os.environ.get("CHAT_ID", "")
 
-print("--- EXTRACTION RUNNER LOGS ---")
-print(f"LINK received: {LINK}")
-print(f"CHAT_ID received: {TARGET_CHAT_ID}")
+print("--- EXTRACTION RUNNER LOGS ---", flush=True)
+print(f"LINK received: {LINK}", flush=True)
+print(f"CHAT_ID received: {TARGET_CHAT_ID}", flush=True)
 
 def parse_telegram_link(link):
     """Extracts chat identifier and message ID from Telegram links."""
@@ -31,7 +31,6 @@ def parse_telegram_link(link):
         if raw_chat.lstrip('-').isdigit():
             chat_id = int(raw_chat)
         else:
-            # Ensure public usernames start with '@'
             chat_id = f"@{raw_chat}" if not raw_chat.startswith("@") else raw_chat
         message_id = int(pub_match.group(2))
         return chat_id, raw_chat, message_id
@@ -40,12 +39,12 @@ def parse_telegram_link(link):
 
 async def run_extraction():
     if not API_ID_RAW or not API_HASH or not STRING_SESSION or not BOT_TOKEN:
-        print("❌ Missing required environment variables!")
+        print("❌ Missing required environment variables!", flush=True)
         return
 
     chat_id, raw_id, message_id = parse_telegram_link(LINK)
     if not chat_id or not message_id:
-        print("❌ Invalid link format!")
+        print("❌ Invalid link format!", flush=True)
         return
 
     api_id = int(API_ID_RAW)
@@ -75,38 +74,39 @@ async def run_extraction():
 
         # --- PUBLIC CHANNEL HANDLING ---
         if isinstance(chat_id, str) and chat_id.startswith("@"):
-            print(f"Resolving public channel username: {chat_id}...")
+            print(f"Resolving public channel username: {chat_id}...", flush=True)
             try:
                 chat_obj = await user_client.get_chat(chat_id)
-                target_peer = chat_obj.id
-                print(f"✅ Resolved public channel: '{chat_obj.title}' (ID: {chat_obj.id})")
+                print(f"✅ Resolved public channel: '{chat_obj.title}'", flush=True)
+                # Keep target_peer as the username string (@channel) for public posts!
+                target_peer = chat_id
             except (UsernameInvalid, UsernameNotOccupied):
                 await bot_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
                 return
             except Exception as e:
-                print(f"Warning resolving username directly: {e}")
+                print(f"Warning resolving username directly: {e}", flush=True)
 
         # --- PRIVATE CHANNEL HANDLING ---
         elif isinstance(chat_id, int):
             found_channel = False
-            print(f"Scanning user dialogs for channel raw ID: {raw_id}...")
+            print(f"Scanning user dialogs for channel raw ID: {raw_id}...", flush=True)
             async for dialog in user_client.get_dialogs():
                 chat = dialog.chat
                 if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
                     target_peer = chat.id
                     found_channel = True
-                    print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})")
+                    print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})", flush=True)
                     break
 
             if not found_channel:
-                print(f"⚠️ Channel {chat_id} not found in user account dialogs!")
+                print(f"⚠️ Channel {chat_id} not found in user account dialogs!", flush=True)
                 await bot_client.send_message(
                     target_chat, 
                     "❌ **Channel Not Found:** Make sure your logged-in user account has joined this private channel."
                 )
                 return
 
-        print(f"Fetching message {message_id} from target peer...")
+        print(f"Fetching message {message_id} from {target_peer}...", flush=True)
         msg = await user_client.get_messages(target_peer, message_id)
 
         if not msg or msg.empty:
@@ -116,12 +116,12 @@ async def run_extraction():
         caption = msg.caption or msg.text or ""
 
         if msg.media:
-            print("Downloading media to cloud runner...")
+            print("Downloading media to cloud runner...", flush=True)
             file_path = await user_client.download_media(msg)
             
             if file_path and os.path.exists(file_path):
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                print(f"Downloaded size: {file_size_mb:.2f} MB. Uploading via Bot MTProto engine...")
+                print(f"Downloaded size: {file_size_mb:.2f} MB. Uploading via Bot MTProto engine...", flush=True)
 
                 if msg.photo:
                     await bot_client.send_photo(target_chat, photo=file_path, caption=caption)
@@ -132,7 +132,7 @@ async def run_extraction():
                 else:
                     await bot_client.send_document(target_chat, document=file_path, caption=caption)
 
-                print("Upload completed successfully!")
+                print("Upload completed successfully!", flush=True)
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -146,7 +146,7 @@ async def run_extraction():
     except ChannelPrivate:
         await bot_client.send_message(target_chat, "❌ **Channel Private:** Your account does not have permission to view posts here.")
     except Exception as e:
-        print(f"Extraction failed: {e}")
+        print(f"Extraction failed: {e}", flush=True)
         await bot_client.send_message(target_chat, f"❌ **Extraction Error:** `{str(e)}`")
     finally:
         await user_client.stop()
