@@ -4,7 +4,7 @@ import re
 import asyncio
 import requests
 from pyrogram import Client
-from pyrogram.errors import PeerIdInvalid, ChannelPrivate, ChatAdminRequired
+from pyrogram.errors import PeerIdInvalid, ChannelPrivate, ChatAdminRequired, FloodWait
 
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
@@ -13,14 +13,22 @@ STRING_SESSION = os.environ.get("STRING_SESSION", "")
 LINK = os.environ.get("LINK", "")
 TARGET_CHAT_ID = os.environ.get("CHAT_ID", "")
 
+print(f"--- EXTRACTION RUNNER LOGS ---")
+print(f"LINK received: {LINK}")
+print(f"CHAT_ID received: {TARGET_CHAT_ID}")
+print(f"BOT_TOKEN present: {bool(BOT_TOKEN)}")
+print(f"STRING_SESSION present: {bool(STRING_SESSION)}")
+
 def send_bot_message(text):
     """Sends status updates back to the user via Telegram Bot API."""
     if not BOT_TOKEN or not TARGET_CHAT_ID:
+        print(f"[WARNING] Cannot send Telegram message. BOT_TOKEN or CHAT_ID missing! Text: {text}")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TARGET_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        print(f"Bot sendMessage status: {res.status_code}")
     except Exception as e:
         print(f"Failed to send bot message: {e}")
 
@@ -44,7 +52,7 @@ def parse_telegram_link(link):
 
 async def run_extraction():
     if not API_ID_RAW or not API_HASH or not STRING_SESSION:
-        send_bot_message("❌ **Extraction Error:** Missing API credentials or session string.")
+        send_bot_message("❌ **Extraction Error:** Missing API credentials or session string in GitHub Secrets.")
         return
 
     chat_id, raw_id, message_id = parse_telegram_link(LINK)
@@ -60,27 +68,33 @@ async def run_extraction():
         in_memory=True
     )
 
-    await client.connect()
+    try:
+        await client.connect()
+    except Exception as conn_err:
+        send_bot_message(f"❌ **Connection Error:** Failed to connect to Telegram: {conn_err}")
+        return
 
     try:
-        # Step 1: Prime Pyrogram's memory database with access hashes by scanning joined dialogs
         if isinstance(chat_id, int):
-            print(f"Syncing account dialogs to populate peer cache for ID: {chat_id}...")
-            async for dialog in client.get_dialogs(limit=500):
-                pass  # Iterating populates internal peer memory automatically
+            print("Syncing recent dialogs...")
+            async for dialog in client.get_dialogs(limit=100):
+                pass
 
-        # Step 2: Fetch message using the integer chat_id directly
         msg = await client.get_messages(chat_id, message_id)
 
         if not msg or msg.empty:
             send_bot_message("❌ **Message Not Found:** The post might be deleted or unavailable.")
             return
 
-        # Step 3: Copy message or download/re-upload if saving content is restricted
+        print("Message fetched successfully. Sending content...")
+
+        # Copy directly to user chat
         try:
             await msg.copy(chat_id=int(TARGET_CHAT_ID))
+            print("Successfully copied message via user session.")
+            send_bot_message("✅ **Extraction Complete!** Check your chat above.")
         except Exception as copy_err:
-            print(f"Direct copy failed ({copy_err}). Downloading media...")
+            print(f"Direct copy failed: {copy_err}. Downloading media...")
             caption = msg.caption or msg.text or ""
             if msg.media:
                 file_path = await client.download_media(msg)
@@ -102,13 +116,17 @@ async def run_extraction():
                         os.remove(file_path)
             elif caption:
                 await client.send_message(int(TARGET_CHAT_ID), text=caption)
+            
+            send_bot_message("✅ **Extraction Complete!**")
 
+    except FloodWait as fw:
+        send_bot_message(f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
     except PeerIdInvalid:
         send_bot_message("❌ **Peer Invalid:** Make sure your logged-in account has joined this private channel!")
     except ChannelPrivate:
         send_bot_message("❌ **Channel Private:** Your account does not have permission to view posts here.")
     except Exception as e:
-        send_bot_message(f"❌ **Extraction Error:** {str(e)}")
+        send_bot_message(f"❌ **Extraction Error:** `{str(e)}`")
     finally:
         await client.disconnect()
 
