@@ -1,0 +1,3 @@
+pyrogram @ git+https://github.com/Kuramdas/pyrogram.git
+tgcrypto
+
