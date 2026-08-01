@@ -2,8 +2,16 @@ import os
 import sys
 import re
 import asyncio
+import traceback
 from pyrogram import Client
-from pyrogram.errors import PeerIdInvalid, ChannelPrivate, FloodWait, UsernameInvalid, UsernameNotOccupied
+from pyrogram.errors import (
+    PeerIdInvalid, 
+    ChannelPrivate, 
+    FloodWait, 
+    UsernameInvalid, 
+    UsernameNotOccupied, 
+    UserAlreadyParticipant
+)
 
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
@@ -74,17 +82,27 @@ async def run_extraction():
 
         # --- PUBLIC CHANNEL HANDLING ---
         if isinstance(chat_id, str) and chat_id.startswith("@"):
-            print(f"Resolving public channel username: {chat_id}...", flush=True)
+            print(f"Handling public channel username: {chat_id}...", flush=True)
+            
+            # 1. Join public channel to guarantee media & message access rights
+            try:
+                await user_client.join_chat(chat_id)
+                print(f"✅ Joined/Verified membership in {chat_id}", flush=True)
+            except UserAlreadyParticipant:
+                print(f"User is already a participant of {chat_id}", flush=True)
+            except Exception as e:
+                print(f"Join chat notice for {chat_id}: {e}", flush=True)
+
+            # 2. Get full chat entity
             try:
                 chat_obj = await user_client.get_chat(chat_id)
-                print(f"✅ Resolved public channel: '{chat_obj.title}'", flush=True)
-                # Keep target_peer as the username string (@channel) for public posts!
-                target_peer = chat_id
+                target_peer = chat_obj.id
+                print(f"✅ Resolved '{chat_obj.title}' to ID: {target_peer}", flush=True)
             except (UsernameInvalid, UsernameNotOccupied):
                 await bot_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
                 return
             except Exception as e:
-                print(f"Warning resolving username directly: {e}", flush=True)
+                print(f"Warning resolving chat entity: {e}", flush=True)
 
         # --- PRIVATE CHANNEL HANDLING ---
         elif isinstance(chat_id, int):
@@ -106,8 +124,10 @@ async def run_extraction():
                 )
                 return
 
-        print(f"Fetching message {message_id} from {target_peer}...", flush=True)
-        msg = await user_client.get_messages(target_peer, message_id)
+        print(f"Fetching message {message_id} from target peer {target_peer}...", flush=True)
+        
+        # 30-second timeout for message metadata fetch
+        msg = await asyncio.wait_for(user_client.get_messages(target_peer, message_id), timeout=30)
 
         if not msg or msg.empty:
             await bot_client.send_message(target_chat, "❌ **Message Not Found:** Post might be deleted or unavailable.")
@@ -117,7 +137,8 @@ async def run_extraction():
 
         if msg.media:
             print("Downloading media to cloud runner...", flush=True)
-            file_path = await user_client.download_media(msg)
+            # 10-minute maximum timeout for downloading media chunks
+            file_path = await asyncio.wait_for(user_client.download_media(msg), timeout=600)
             
             if file_path and os.path.exists(file_path):
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -139,15 +160,22 @@ async def run_extraction():
         elif caption:
             await bot_client.send_message(target_chat, text=caption)
 
+    except asyncio.TimeoutError:
+        print("❌ Operation timed out!", flush=True)
+        await bot_client.send_message(target_chat, "⏱️ **Timeout Error:** Telegram took too long to send the requested file.")
     except FloodWait as fw:
         await bot_client.send_message(target_chat, f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
     except PeerIdInvalid:
         await bot_client.send_message(target_chat, "❌ **Peer Invalid:** Unable to resolve this chat. Make sure the channel exists and is accessible.")
     except ChannelPrivate:
         await bot_client.send_message(target_chat, "❌ **Channel Private:** Your account does not have permission to view posts here.")
-    except Exception as e:
-        print(f"Extraction failed: {e}", flush=True)
-        await bot_client.send_message(target_chat, f"❌ **Extraction Error:** `{str(e)}`")
+    except BaseException as e:
+        err_detail = str(e) or type(e).__name__
+        print(f"Extraction failed: {err_detail}\n{traceback.format_exc()}", flush=True)
+        try:
+            await bot_client.send_message(target_chat, f"❌ **Extraction Error:** `{err_detail}`")
+        except Exception:
+            pass
     finally:
         await user_client.stop()
         await bot_client.stop()
