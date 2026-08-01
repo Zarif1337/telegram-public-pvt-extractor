@@ -10,7 +10,6 @@ from pyrogram.errors import (
     FloodWait, 
     UsernameInvalid, 
     UsernameNotOccupied, 
-    UserAlreadyParticipant,
     ChatForwardsRestricted
 )
 
@@ -81,28 +80,20 @@ async def run_extraction():
     try:
         target_peer = chat_id
 
-        # --- PUBLIC CHANNEL HANDLING ---
+        # --- PUBLIC CHANNEL HANDLING (NO JOINING REQUIRED) ---
         if isinstance(chat_id, str) and chat_id.startswith("@"):
-            print(f"Handling public channel username: {chat_id}...", flush=True)
-            
+            print(f"Resolving public channel: {chat_id}...", flush=True)
             try:
-                await user_client.join_chat(chat_id)
-                print(f"✅ Joined/Verified membership in {chat_id}", flush=True)
-            except UserAlreadyParticipant:
-                print(f"User is already a participant of {chat_id}", flush=True)
-            except Exception as e:
-                print(f"Join chat notice: {e}", flush=True)
-
-            try:
-                # Store full Chat Object entity directly (preserves access hash)
-                target_peer = await user_client.get_chat(chat_id)
-                print(f"✅ Resolved entity: '{target_peer.title}'", flush=True)
+                # Pre-fetch chat object to cache public entity in Pyrogram's memory
+                chat_obj = await user_client.get_chat(chat_id)
+                print(f"✅ Resolved public channel: '{chat_obj.title}'", flush=True)
             except (UsernameInvalid, UsernameNotOccupied):
                 await bot_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
                 return
             except Exception as e:
                 print(f"Warning resolving chat entity: {e}", flush=True)
-                target_peer = chat_id
+
+            target_peer = chat_id  # Keep as string (@channel)
 
         # --- PRIVATE CHANNEL HANDLING ---
         elif isinstance(chat_id, int):
@@ -111,7 +102,7 @@ async def run_extraction():
             async for dialog in user_client.get_dialogs():
                 chat = dialog.chat
                 if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
-                    target_peer = chat
+                    target_peer = chat.id
                     found_channel = True
                     print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})", flush=True)
                     break
@@ -124,7 +115,7 @@ async def run_extraction():
                 )
                 return
 
-        print(f"Fetching message {message_id}...", flush=True)
+        print(f"Fetching message {message_id} from {target_peer}...", flush=True)
         msg = await asyncio.wait_for(user_client.get_messages(target_peer, message_id), timeout=30)
 
         if not msg or msg.empty:
@@ -163,7 +154,7 @@ async def run_extraction():
             await bot_client.send_message(target_chat, text=caption)
 
     except ChatForwardsRestricted:
-        await bot_client.send_message(target_chat, "🚫 **Content Protected:** Saving/forwarding is restricted in this channel by the owner.")
+        await bot_client.send_message(target_chat, "🚫 **Content Protected:** Saving or forwarding media is restricted in this channel by the owner.")
     except asyncio.TimeoutError:
         print("❌ Operation timed out!", flush=True)
         await bot_client.send_message(target_chat, "⏱️ **Timeout Error:** Telegram took too long to send the requested file.")
