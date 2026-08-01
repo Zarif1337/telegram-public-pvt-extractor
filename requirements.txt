@@ -1,3 +1,2 @@
-pyrogram @ git+https://github.com/Kuramdas/pyrogram.git
+Kurigram
 tgcrypto
-
