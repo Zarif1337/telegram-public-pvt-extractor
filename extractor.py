@@ -1,3 +1,10 @@
+ finally:
+        await user_client.stop()
+        if bot_active:
+            await bot_client.stop()
+
+if __name__ == "__main__":
+    asyncio.run(run_extraction())
 import os
 import sys
 import re
@@ -143,7 +150,9 @@ async def run_extraction():
             return
 
         print(f"✅ Message {message_id} fetched successfully!", flush=True)
-        print(f"Raw Msg Debug -> text: {bool(msg.text)}, caption: {bool(msg.caption)}, media_type: {msg.media}", flush=True)
+        
+        # --- RAW DATA DUMP TO CATCH GHOST MESSAGES ---
+        print(f"RAW TELEGRAM DATA:\n{msg}", flush=True)
 
         caption = msg.caption or msg.text or ""
         has_media = bool(msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker)
