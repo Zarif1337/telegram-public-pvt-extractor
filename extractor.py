@@ -16,6 +16,7 @@ from pyrogram.errors import (
 
 API_ID_RAW = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 LINK = os.environ.get("LINK", "")
 TARGET_CHAT_ID = os.environ.get("CHAT_ID", "")
@@ -46,7 +47,7 @@ def parse_telegram_link(link):
     return None, None, None
 
 async def run_extraction():
-    if not API_ID_RAW or not API_HASH or not STRING_SESSION:
+    if not API_ID_RAW or not API_HASH or not STRING_SESSION or not BOT_TOKEN:
         print("❌ Missing required environment variables!", flush=True)
         return
 
@@ -66,7 +67,26 @@ async def run_extraction():
         in_memory=True
     )
 
+    bot_client = Client(
+        "bot_session",
+        api_id=api_id,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        in_memory=True
+    )
+
     await user_client.start()
+    
+    # Start bot client for delivering messages directly to bot chat
+    bot_active = False
+    try:
+        await bot_client.start()
+        bot_active = True
+    except Exception as b_err:
+        print(f"⚠️ Bot client start notice: {b_err}. Falling back to user client delivery.", flush=True)
+
+    # Sender client reference (Bot preferred so it lands in Bot DM)
+    sender = bot_client if bot_active else user_client
 
     try:
         target_peer = chat_id
@@ -75,15 +95,24 @@ async def run_extraction():
         if isinstance(chat_id, str) and chat_id.startswith("@"):
             print(f"Resolving public channel: {chat_id}...", flush=True)
             try:
+                # Join channel to ensure full MTProto access rights
+                await user_client.join_chat(chat_id)
+                print(f"✅ Joined membership in {chat_id}", flush=True)
+            except UserAlreadyParticipant:
+                pass
+            except Exception as e:
+                print(f"Join notice: {e}", flush=True)
+
+            try:
+                # Get resolved entity ID to unlock full message payload
                 chat_obj = await user_client.get_chat(chat_id)
-                print(f"✅ Resolved public channel: '{chat_obj.title}'", flush=True)
+                target_peer = chat_obj.id
+                print(f"✅ Resolved public channel entity: '{chat_obj.title}' (ID: {target_peer})", flush=True)
             except (UsernameInvalid, UsernameNotOccupied):
-                await user_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
+                await sender.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
                 return
             except Exception as e:
                 print(f"Warning resolving chat entity: {e}", flush=True)
-
-            target_peer = chat_id
 
         # --- PRIVATE CHANNEL HANDLING ---
         elif isinstance(chat_id, int):
@@ -99,7 +128,7 @@ async def run_extraction():
 
             if not found_channel:
                 print(f"⚠️ Channel {chat_id} not found in user account dialogs!", flush=True)
-                await user_client.send_message(
+                await sender.send_message(
                     target_chat, 
                     "❌ **Channel Not Found:** Make sure your logged-in user account has joined this private channel."
                 )
@@ -110,24 +139,14 @@ async def run_extraction():
 
         if not msg or msg.empty:
             print("❌ Message empty or not found.", flush=True)
-            await user_client.send_message(target_chat, "❌ **Message Not Found:** Post might be deleted or unavailable.")
+            await sender.send_message(target_chat, "❌ **Message Not Found:** Post might be deleted or unavailable.")
             return
 
         print(f"✅ Message {message_id} fetched successfully!", flush=True)
+        print(f"Raw Msg Debug -> text: {bool(msg.text)}, caption: {bool(msg.caption)}, media_type: {msg.media}", flush=True)
 
-        has_media = msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker
         caption = msg.caption or msg.text or ""
-
-        # --- AUTO-JOIN FALLBACK IF PAYLOAD IS BLOCKED BY TELEGRAM ---
-        if not has_media and not caption and isinstance(chat_id, str) and chat_id.startswith("@"):
-            print("⚠️ Media/text payload empty. Attempting auto-join to unlock MTProto stream...", flush=True)
-            try:
-                await user_client.join_chat(chat_id)
-                msg = await asyncio.wait_for(user_client.get_messages(target_peer, message_id), timeout=30)
-                has_media = msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker
-                caption = msg.caption or msg.text or ""
-            except Exception as join_err:
-                print(f"Auto-join attempt notice: {join_err}", flush=True)
+        has_media = bool(msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker)
 
         if has_media:
             print("Downloading media to cloud runner...", flush=True)
@@ -135,16 +154,16 @@ async def run_extraction():
             
             if file_path and os.path.exists(file_path):
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                print(f"Downloaded size: {file_size_mb:.2f} MB. Uploading directly to user chat...", flush=True)
+                print(f"Downloaded size: {file_size_mb:.2f} MB. Uploading to Bot chat...", flush=True)
 
                 if msg.photo:
-                    await user_client.send_photo(target_chat, photo=file_path, caption=caption)
+                    await sender.send_photo(target_chat, photo=file_path, caption=caption)
                 elif msg.video:
-                    await user_client.send_video(target_chat, video=file_path, caption=caption)
+                    await sender.send_video(target_chat, video=file_path, caption=caption)
                 elif msg.audio:
-                    await user_client.send_audio(target_chat, audio=file_path, caption=caption)
+                    await sender.send_audio(target_chat, audio=file_path, caption=caption)
                 else:
-                    await user_client.send_document(target_chat, document=file_path, caption=caption)
+                    await sender.send_document(target_chat, document=file_path, caption=caption)
 
                 print("Upload completed successfully!", flush=True)
 
@@ -152,34 +171,36 @@ async def run_extraction():
                     os.remove(file_path)
             else:
                 print("❌ Download failed or file path invalid.", flush=True)
-                await user_client.send_message(target_chat, "❌ **Download Error:** Could not save media file.")
+                await sender.send_message(target_chat, "❌ **Download Error:** Could not save media file.")
         elif caption:
-            await user_client.send_message(target_chat, text=caption)
+            await sender.send_message(target_chat, text=caption)
         else:
-            print("⚠️ No media or caption found in this message.", flush=True)
-            await user_client.send_message(target_chat, "⚠️ **Empty Content:** This post contains no downloadable media or text.")
+            print("⚠️ No media or caption found in message object.", flush=True)
+            await sender.send_message(target_chat, "⚠️ **Empty Content:** This post contains no downloadable media or text.")
 
     except ChatForwardsRestricted:
-        await user_client.send_message(target_chat, "🚫 **Content Protected:** Saving or forwarding media is restricted in this channel by the owner.")
+        await sender.send_message(target_chat, "🚫 **Content Protected:** Saving or forwarding media is restricted in this channel by the owner.")
     except asyncio.TimeoutError:
         print("❌ Operation timed out!", flush=True)
-        await user_client.send_message(target_chat, "⏱️ **Timeout Error:** Telegram took too long to send the requested file.")
+        await sender.send_message(target_chat, "⏱️ **Timeout Error:** Telegram took too long to send the requested file.")
     except FloodWait as fw:
         print(f"Rate limited for {fw.value}s", flush=True)
-        await user_client.send_message(target_chat, f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
+        await sender.send_message(target_chat, f"⏳ **Rate Limited:** Telegram requested a wait of `{fw.value}` seconds.")
     except PeerIdInvalid:
-        await user_client.send_message(target_chat, "❌ **Peer Invalid:** Unable to resolve this chat. Make sure the channel exists and is accessible.")
+        await sender.send_message(target_chat, "❌ **Peer Invalid:** Unable to resolve this chat. Make sure the channel exists and is accessible.")
     except ChannelPrivate:
-        await user_client.send_message(target_chat, "❌ **Channel Private:** Your account does not have permission to view posts here.")
+        await sender.send_message(target_chat, "❌ **Channel Private:** Your account does not have permission to view posts here.")
     except BaseException as e:
         err_detail = str(e) or type(e).__name__
         print(f"Extraction failed: {err_detail}\n{traceback.format_exc()}", flush=True)
         try:
-            await user_client.send_message(target_chat, f"❌ **Extraction Error:** `{err_detail}`")
+            await sender.send_message(target_chat, f"❌ **Extraction Error:** `{err_detail}`")
         except Exception:
             pass
     finally:
         await user_client.stop()
+        if bot_active:
+            await bot_client.stop()
 
 if __name__ == "__main__":
     asyncio.run(run_extraction())
