@@ -10,7 +10,8 @@ from pyrogram.errors import (
     FloodWait, 
     UsernameInvalid, 
     UsernameNotOccupied, 
-    UserAlreadyParticipant
+    UserAlreadyParticipant,
+    ChatForwardsRestricted
 )
 
 API_ID_RAW = os.environ.get("API_ID", "")
@@ -84,25 +85,24 @@ async def run_extraction():
         if isinstance(chat_id, str) and chat_id.startswith("@"):
             print(f"Handling public channel username: {chat_id}...", flush=True)
             
-            # 1. Join public channel to guarantee media & message access rights
             try:
                 await user_client.join_chat(chat_id)
                 print(f"✅ Joined/Verified membership in {chat_id}", flush=True)
             except UserAlreadyParticipant:
                 print(f"User is already a participant of {chat_id}", flush=True)
             except Exception as e:
-                print(f"Join chat notice for {chat_id}: {e}", flush=True)
+                print(f"Join chat notice: {e}", flush=True)
 
-            # 2. Get full chat entity
             try:
-                chat_obj = await user_client.get_chat(chat_id)
-                target_peer = chat_obj.id
-                print(f"✅ Resolved '{chat_obj.title}' to ID: {target_peer}", flush=True)
+                # Store full Chat Object entity directly (preserves access hash)
+                target_peer = await user_client.get_chat(chat_id)
+                print(f"✅ Resolved entity: '{target_peer.title}'", flush=True)
             except (UsernameInvalid, UsernameNotOccupied):
                 await bot_client.send_message(target_chat, f"❌ **Invalid Username:** Channel `{chat_id}` does not exist.")
                 return
             except Exception as e:
                 print(f"Warning resolving chat entity: {e}", flush=True)
+                target_peer = chat_id
 
         # --- PRIVATE CHANNEL HANDLING ---
         elif isinstance(chat_id, int):
@@ -111,7 +111,7 @@ async def run_extraction():
             async for dialog in user_client.get_dialogs():
                 chat = dialog.chat
                 if chat.id == chat_id or str(chat.id).endswith(str(raw_id)):
-                    target_peer = chat.id
+                    target_peer = chat
                     found_channel = True
                     print(f"✅ Found target channel in dialogs: '{chat.title}' (ID: {chat.id})", flush=True)
                     break
@@ -124,20 +124,19 @@ async def run_extraction():
                 )
                 return
 
-        print(f"Fetching message {message_id} from target peer {target_peer}...", flush=True)
-        
-        # 30-second timeout for message metadata fetch
+        print(f"Fetching message {message_id}...", flush=True)
         msg = await asyncio.wait_for(user_client.get_messages(target_peer, message_id), timeout=30)
 
         if not msg or msg.empty:
+            print("❌ Message empty or not found.", flush=True)
             await bot_client.send_message(target_chat, "❌ **Message Not Found:** Post might be deleted or unavailable.")
             return
 
+        print(f"✅ Message {message_id} fetched successfully!", flush=True)
         caption = msg.caption or msg.text or ""
 
         if msg.media:
             print("Downloading media to cloud runner...", flush=True)
-            # 10-minute maximum timeout for downloading media chunks
             file_path = await asyncio.wait_for(user_client.download_media(msg), timeout=600)
             
             if file_path and os.path.exists(file_path):
@@ -157,9 +156,14 @@ async def run_extraction():
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
+            else:
+                print("❌ Download failed or file path invalid.", flush=True)
+                await bot_client.send_message(target_chat, "❌ **Download Error:** Could not save media file.")
         elif caption:
             await bot_client.send_message(target_chat, text=caption)
 
+    except ChatForwardsRestricted:
+        await bot_client.send_message(target_chat, "🚫 **Content Protected:** Saving/forwarding is restricted in this channel by the owner.")
     except asyncio.TimeoutError:
         print("❌ Operation timed out!", flush=True)
         await bot_client.send_message(target_chat, "⏱️ **Timeout Error:** Telegram took too long to send the requested file.")
