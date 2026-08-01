@@ -10,7 +10,8 @@ from pyrogram.errors import (
     FloodWait, 
     UsernameInvalid, 
     UsernameNotOccupied, 
-    ChatForwardsRestricted
+    ChatForwardsRestricted,
+    UserAlreadyParticipant
 )
 
 API_ID_RAW = os.environ.get("API_ID", "")
@@ -113,9 +114,22 @@ async def run_extraction():
             return
 
         print(f"✅ Message {message_id} fetched successfully!", flush=True)
+
+        has_media = msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker
         caption = msg.caption or msg.text or ""
 
-        if msg.media:
+        # --- AUTO-JOIN FALLBACK IF PAYLOAD IS BLOCKED BY TELEGRAM ---
+        if not has_media and not caption and isinstance(chat_id, str) and chat_id.startswith("@"):
+            print("⚠️ Media/text payload empty. Attempting auto-join to unlock MTProto stream...", flush=True)
+            try:
+                await user_client.join_chat(chat_id)
+                msg = await asyncio.wait_for(user_client.get_messages(target_peer, message_id), timeout=30)
+                has_media = msg.media or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker
+                caption = msg.caption or msg.text or ""
+            except Exception as join_err:
+                print(f"Auto-join attempt notice: {join_err}", flush=True)
+
+        if has_media:
             print("Downloading media to cloud runner...", flush=True)
             file_path = await asyncio.wait_for(user_client.download_media(msg), timeout=600)
             
@@ -141,6 +155,9 @@ async def run_extraction():
                 await user_client.send_message(target_chat, "❌ **Download Error:** Could not save media file.")
         elif caption:
             await user_client.send_message(target_chat, text=caption)
+        else:
+            print("⚠️ No media or caption found in this message.", flush=True)
+            await user_client.send_message(target_chat, "⚠️ **Empty Content:** This post contains no downloadable media or text.")
 
     except ChatForwardsRestricted:
         await user_client.send_message(target_chat, "🚫 **Content Protected:** Saving or forwarding media is restricted in this channel by the owner.")
