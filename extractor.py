@@ -1,10 +1,3 @@
- finally:
-        await user_client.stop()
-        if bot_active:
-            await bot_client.stop()
-
-if __name__ == "__main__":
-    asyncio.run(run_extraction())
 import os
 import sys
 import re
@@ -84,7 +77,6 @@ async def run_extraction():
 
     await user_client.start()
     
-    # Start bot client for delivering messages directly to bot chat
     bot_active = False
     try:
         await bot_client.start()
@@ -92,7 +84,6 @@ async def run_extraction():
     except Exception as b_err:
         print(f"⚠️ Bot client start notice: {b_err}. Falling back to user client delivery.", flush=True)
 
-    # Sender client reference (Bot preferred so it lands in Bot DM)
     sender = bot_client if bot_active else user_client
 
     try:
@@ -102,7 +93,6 @@ async def run_extraction():
         if isinstance(chat_id, str) and chat_id.startswith("@"):
             print(f"Resolving public channel: {chat_id}...", flush=True)
             try:
-                # Join channel to ensure full MTProto access rights
                 await user_client.join_chat(chat_id)
                 print(f"✅ Joined membership in {chat_id}", flush=True)
             except UserAlreadyParticipant:
@@ -111,7 +101,6 @@ async def run_extraction():
                 print(f"Join notice: {e}", flush=True)
 
             try:
-                # Get resolved entity ID to unlock full message payload
                 chat_obj = await user_client.get_chat(chat_id)
                 target_peer = chat_obj.id
                 print(f"✅ Resolved public channel entity: '{chat_obj.title}' (ID: {target_peer})", flush=True)
